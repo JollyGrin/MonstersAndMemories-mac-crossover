@@ -229,6 +229,8 @@ chmod +x mnm.sh
       <tr><td>Launcher crashes when I click Play.</td><td>Expected. Use <code>./mnm.sh play</code>.</td></tr>
       <tr><td>Game looks glitchy or crashes at login screen.</td><td>The bottle ships with DXVK. D3DMetal crashes this game; DXMT has known rendering glitches.</td></tr>
       <tr><td>CrossOver in a non-default location.</td><td>Tool checks <code>/Applications</code> and <code>~/Applications</code>. If yours is elsewhere, symlink it or open an issue.</td></tr>
+      <tr><td>Launcher installed the game to a non-default folder and <code>./mnm.sh play</code> can’t find it.</td><td>The launcher picks its CWD as the default install path. <code>doctor</code> auto-discovers common spots (<code>./mnm</code>, <code>~/Downloads/mnm</code>, <code>~/Applications/mnm</code>, <code>~/Games/mnm</code>) — so just re-run <code>doctor</code>. If it’s somewhere else entirely, set <code>MNM_GAMEDIR=/path/to/mnm</code>.</td></tr>
+      <tr><td>Tried everything and it’s still broken.</td><td><code>./mnm.sh nuke</code> — prompts you to type <code>nuke</code>, then wipes the app, launcher DB, game files, bottle, and download cache. Then run <code>./mnm.sh all &amp;&amp; ./mnm.sh patch &amp;&amp; ./mnm.sh play</code>. Fresh slate fixes almost everything.</td></tr>
     </tbody>
   </table>
 

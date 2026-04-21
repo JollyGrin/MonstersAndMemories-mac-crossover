@@ -301,6 +301,22 @@ Token lifetime is ~28 days (`iat → exp` delta). In practice that means `patch`
 
 `doctor` and `play` now base64-decode the JWT payload (pure shell, no `jq`) and surface a friendly `valid ~Nd` / `expiring in Nh` / `expired Nd ago` status. `play` aborts if expired so you don't discover the bad token by reading it off a game error screen.
 
+### Game install path: launcher defaults to its CWD
+
+On a fresh install after `nuke`, the Mac launcher didn't drop files into the expected `~/Downloads/mnm/` and didn't write a `gamePath` key to `launcher.db.settings` either. After hunting the filesystem we found the game at `/Users/grins/git/monstersandmemories/mnm/` — **the working directory the launcher was spawned from** (we open it via `nohup "$APP_BIN" --stinky-cheese &` from `cmd_patch`, so it inherits the shell's CWD). Older launcher builds (0.20.3 era) wrote `gamePath` to the settings table; 0.22.x-labeled builds don't consistently, so the script can't trust that single source.
+
+Fix: `game_dir()` now resolves in this order — `$MNM_GAMEDIR` env override → `launcher.db.settings.gamePath` → auto-discover by scanning `${SCRIPT_DIR}/mnm`, `~/Downloads/mnm`, `~/Applications/mnm`, `~/Games/mnm` for an existing `mnm.exe` → hard default. That makes `play` work regardless of where the launcher chose to install. `MNM_GAMEDIR` also documented in `--help`.
+
+`.gitignore` already covers `mnm/`, so the repo-local install doesn't try to track 7 GB of game files.
+
+### When in doubt, `nuke`
+
+Several times during the session we got stuck in states that iterative fixes couldn't untangle — stale `game_versions` row, partial patch state, a bottle that had the wrong launcher installed, an orphan tokens table, etc. Reliable answer each time ended up being: start over.
+
+`./mnm.sh nuke` (added Step-8-ish) deletes: the app in `/Applications`, `~/Library/Application Support/com.monstersandmemories.mnm-patcher-app/`, the game dir at `gamePath` (read **before** wiping the db — otherwise you orphan 7 GB), the CrossOver bottle (via `cxbottle --delete --force`, falls back to `rm -rf` if CX isn't present), and our `dl/` cache. Refuses to touch a `gamePath` that doesn't look like an M&M install (pattern-match `*/mnm` / `*/Monsters*Memories*`) so a mis-set env var can't eat your home dir. Requires typing the literal word `nuke` to confirm.
+
+After `nuke` the recovery flow is just: `./mnm.sh all && ./mnm.sh patch && ./mnm.sh play`. If anything post-nuke misbehaves, rerunning that trio is the fastest way to a known-good state.
+
 ### Closed-beta entitlement is gated in the server, not the Mac binary
 
 When the in-game "Patch Required" kept firing for a user whose account page clearly showed the `PVP Only Closed Tester` badge, the next instinct was "the Mac launcher is too old; force an upgrade." The update endpoint
