@@ -301,6 +301,31 @@ Token lifetime is ~28 days (`iat → exp` delta). In practice that means `patch`
 
 `doctor` and `play` now base64-decode the JWT payload (pure shell, no `jq`) and surface a friendly `valid ~Nd` / `expiring in Nh` / `expired Nd ago` status. `play` aborts if expired so you don't discover the bad token by reading it off a game error screen.
 
+### The launcher can get "split-brain" on game version
+
+Hit on first successful login: the game client booted fine, connected to the server, and got *"Patch Required. Please exit game and update."* — but the launcher insisted everything was up to date, and the in-UI Repair button didn't help either.
+
+What was actually happening:
+
+| Source | Claim |
+| --- | --- |
+| `launcher.db` → `game_versions.version` | `publish-0.22.0.1-b032449…` |
+| `~/Downloads/mnm/mnm.exe` reported build | `Public Build 0.21.2.0` (March 28 mtime) |
+| `~/Downloads/mnm/.bundles/` | empty |
+| `bundle_cache` table | didn't exist at all |
+| Latest public patch (per patch notes) | `0.22.0.0` (2026-04-07) |
+
+The launcher had written the version record once (on first full install), then every subsequent open — and Repair — short-circuited on that record and never downloaded anything, even when newer bundles were available. The server correctly rejected the stale client.
+
+Fix: delete the row in `game_versions` and reopen the launcher. It re-fetches the manifest, diffs against what's on disk, and downloads only the changed chunks (no 6.9 GB redo). Added this as `mnm.sh repatch` — it refuses to run if the launcher is still up, then clears the row and invokes `patch`.
+
+Schema gotcha worth pinning: the column in `game_versions` is `version`, not `value` (I typoed `SELECT value FROM game_versions …` first). Full schema:
+
+```
+CREATE TABLE game_versions (slug TEXT PRIMARY KEY, version TEXT);
+CREATE TABLE settings     (variable TEXT PRIMARY KEY, value TEXT);
+```
+
 ### Doctor now reports the whole pipeline
 
 Reads `launcher.db` to show who's logged in, whether a token is present, what `gamePath` the launcher has, and whether `mnm.exe` is actually on disk. Makes it obvious which of the three user-gated steps (install launcher / log in / download game) you're missing.

@@ -250,6 +250,34 @@ cmd_patch() {
     warn "When patching finishes, close the launcher and run: ${C_BOLD}./mnm.sh play${C_RESET}"
 }
 
+cmd_repatch() {
+    # Forces the launcher to recheck the manifest. Symptom this fixes:
+    # launcher.db.game_versions says you're on a new version, but the
+    # on-disk game.exe reports an older build (split-brain). "Repair"
+    # in the launcher UI doesn't help because it short-circuits on the
+    # version record. Deleting that row makes the next launch fetch the
+    # manifest fresh and download only the changed chunks.
+    [[ -f "$LAUNCHER_DB" ]] || fail "No launcher.db — run: ./mnm.sh patch first"
+
+    if pgrep -fq "mnm_launcher"; then
+        warn "Launcher is still running — close it first, then re-run this."
+        exit 1
+    fi
+
+    local cur; cur="$(sqlite3 "$LAUNCHER_DB" "SELECT version FROM game_versions WHERE slug='mnm';" 2>/dev/null)"
+    if [[ -n "$cur" ]]; then
+        info "Clearing recorded version: ${cur}"
+        sqlite3 "$LAUNCHER_DB" "DELETE FROM game_versions WHERE slug='mnm';"
+        ok "Cleared. Launcher will re-diff against the live manifest on next open."
+    else
+        ok "No stale version record to clear."
+    fi
+
+    cmd_patch
+    echo
+    info "In the launcher: click Download/Patch to pull the delta. Files it already has are reused."
+}
+
 cmd_play() {
     local bin; bin="$(cx_bin)" || fail "CrossOver not installed"
     [[ -d "$BOTTLE_ROOT" ]] || fail "No bottle — run: ./mnm.sh bottle"
@@ -325,6 +353,7 @@ ${C_BOLD}Commands${C_RESET}
   mac           Download + fix + install the Mac launcher
   bottle        Create the CrossOver bottle for the game client
   patch         Open the Mac launcher with --stinky-cheese (skips update loop)
+  repatch       Clear the stuck version record and re-open for a forced diff
   play          Read token from launcher.db, run mnm.exe in the bottle
   all           doctor + mac + bottle  (then run patch, then play)
   clean         Remove cached downloads
@@ -348,6 +377,7 @@ case "${1:-}" in
     mac)            cmd_mac ;;
     bottle)         cmd_bottle ;;
     patch)          cmd_patch ;;
+    repatch)        cmd_repatch ;;
     play)           cmd_play ;;
     all)            cmd_all ;;
     clean)          cmd_clean ;;
