@@ -1,0 +1,39 @@
+name: Deploy site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index.html"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      # Publish the repo root. The artifact only needs index.html,
+      # but uploading the root lets us link to LEARNINGS.md / mnm.sh too
+      # if we ever want to serve them from the site itself.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
