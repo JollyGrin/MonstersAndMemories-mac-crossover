@@ -301,6 +301,43 @@ Token lifetime is ~28 days (`iat → exp` delta). In practice that means `patch`
 
 `doctor` and `play` now base64-decode the JWT payload (pure shell, no `jq`) and surface a friendly `valid ~Nd` / `expiring in Nh` / `expired Nd ago` status. `play` aborts if expired so you don't discover the bad token by reading it off a game error screen.
 
+### Closed-beta entitlement is gated in the server, not the Mac binary
+
+When the in-game "Patch Required" kept firing for a user whose account page clearly showed the `PVP Only Closed Tester` badge, the next instinct was "the Mac launcher is too old; force an upgrade." The update endpoint
+
+```
+GET https://account.monstersandmemories.com/api/launcher/update?target=darwin-aarch64&current_version=0.20.3
+  -> { "version": "0.22.13", "url": "…/launcher_v2/0.22.13/mnm_patcher_app_0.22.13_aarch64.app.tar.gz", … }
+```
+
+advertised `0.22.13`, three ahead of the `0.20.3` on disk, which looked like the smoking gun. Downloaded it, SHA-compared to the public-page tar, and the update-API tar, and the extracted `.tar.gz` on disk from yesterday:
+
+```
+3ef88c1566acccb6e3abad871017568dce3295ffcc0779e7ec2a671401b86571   dl/mnm_launcher_0.22.13.app.tar.gz
+3ef88c1566acccb6e3abad871017568dce3295ffcc0779e7ec2a671401b86571   dl/Monsters & Memories.app.tar.gz
+3ef88c1566acccb6e3abad871017568dce3295ffcc0779e7ec2a671401b86571   Monsters & Memories.app.tar.gz
+```
+
+Byte-identical. The `version` field in the update API is a release label that's outpaced the actual Mac rebuild — nobody has cut a new Mac launcher binary since 0.20.3 even though the index advertises 0.22.13. So a Mac-launcher upgrade can't unlock a beta channel, because there is no newer Mac launcher to upgrade to.
+
+Which leaves only one explanation: the channel dropdown `fetch_channel_data` returns a list filtered server-side by the user's token, and for this user the server is only returning the public channel despite the account being marked `PVP Only Closed Tester`. That's a backend entitlement linkage issue (account flag ↔ launcher channel list) that needs to be fixed by the M&M team; there's no client-side knob that bypasses it.
+
+Also updated `doctor`: comparing `CFBundleShortVersionString` across installs is misleading because the update API's version field drifts independently of the actual binary. `mac` now writes `dl/.installed_tar.sha256` at install time and `doctor` compares that against the SHA of the latest tar the API advertises. "Same binary" shows a ✓; only a real byte-diff triggers the "run mac to update" warning.
+
+### “Patch Required” from the server is often a lie
+
+Saw *"Patch Required. Please exit game and update."* at the server list screen. Initially assumed it meant the client was stale, and shipped `mnm.sh repatch` to force a fresh manifest check. Re-running repatch and reopening the launcher produced no new downloads — the launcher rewrote the same `publish-0.22.0.1-…` version record and reported up-to-date. File mtimes stayed March 28.
+
+Then re-read the in-game Notice panel on the same screen:
+
+> SERVERS ARE CURRENTLY CLOSED. You WILL NOT be able to log in, but you can create a character and run around in the local campfire scene by clicking the flame icon…
+
+That’s the real answer. Between scheduled public playtests, the server returns a generic *"Patch Required"* to every connection regardless of client version. Public playtests are announced on Discord / the mailing list; outside them the only way in is opting into closed testing, which is invite-gated.
+
+So: the Mac launcher was never actually split-brain here. Our client slug `publish-0.22.0.1-b032449…` is *newer* than the public `0.22.0.0` shown in the patch notes (looks like a hotfix), and the baked-in display string *"Public Build 0.21.2.0"* is just a stale label inside mnm.exe — the chunk hashes still match whatever the manifest says is current. `repatch` stays in the tool as a safety net for the rare case where a bundle cache really does desync, but the first guess should now be "server’s closed, not the client."
+
+Surfaced in the site troubleshooting table.
+
 ### The launcher can get "split-brain" on game version
 
 Hit on first successful login: the game client booted fine, connected to the server, and got *"Patch Required. Please exit game and update."* — but the launcher insisted everything was up to date, and the in-UI Repair button didn't help either.

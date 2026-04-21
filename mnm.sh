@@ -23,12 +23,18 @@
 set -euo pipefail
 
 # ---- configuration ----------------------------------------------------------
-BASE_URL="https://pub-f06cad9ebbcd412bb0f4ff64f0f6a3d7.r2.dev/launcher_v2/installer"
-MAC_TAR_URL="${BASE_URL}/Monsters%20%26%20Memories.app.tar.gz"
+# Two sources for the Mac launcher tar.gz:
+#   1. The launcher-update API — always current, URL is versioned.
+#      We ask for the user's exact arch so we don't ship the wrong build.
+#   2. The public download page — frozen at an older version (was 0.20.3 when
+#      we last looked, while the API was handing out 0.22.13).
+# "mac" prefers (1), falls back to (2) if the API is unreachable.
+UPDATE_API_BASE="https://account.monstersandmemories.com/api/launcher/update"
+FALLBACK_BASE="https://pub-f06cad9ebbcd412bb0f4ff64f0f6a3d7.r2.dev/launcher_v2/installer"
+FALLBACK_MAC_TAR_URL="${FALLBACK_BASE}/Monsters%20%26%20Memories.app.tar.gz"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DL_DIR="${MNM_DL_DIR:-${SCRIPT_DIR}/dl}"
-MAC_TAR="${DL_DIR}/Monsters & Memories.app.tar.gz"
 
 APP_BUNDLE_NAME="mnm_patcher_app.app"
 APP_INSTALL_DIR="${MNM_APP_DIR:-/Applications}"
@@ -79,8 +85,29 @@ db_get() {
 }
 
 game_dir() {
+    # Resolution order:
+    #   1. MNM_GAMEDIR env override (explicit).
+    #   2. gamePath in launcher.db (older launcher builds wrote this; 0.22.x
+    #      doesn't always).
+    #   3. Auto-discover — scan known defaults for an existing mnm.exe.
+    #   4. Fall through to the documented default so `doctor` can point to it.
+    if [[ -n "${MNM_GAMEDIR:-}" ]]; then echo "$MNM_GAMEDIR"; return; fi
     local gp; gp="$(db_get gamePath)"
-    echo "${gp:-$DEFAULT_GAME_DIR}"
+    if [[ -n "$gp" ]]; then echo "$gp"; return; fi
+
+    local candidate
+    for candidate in \
+        "${SCRIPT_DIR}/mnm" \
+        "${HOME}/Downloads/mnm" \
+        "${HOME}/Applications/mnm" \
+        "${HOME}/Games/mnm"
+    do
+        if [[ -f "${candidate}/${GAME_EXE_NAME}" ]]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo "$DEFAULT_GAME_DIR"
 }
 
 # token_exp — echoes the `exp` unix timestamp of the stored JWT, or nothing.
@@ -121,6 +148,35 @@ token_status() {
 
 ensure_dl_dir() { mkdir -p "$DL_DIR"; }
 
+# Target triple the update API expects for this machine.
+update_target() {
+    case "$(uname -m)" in
+        arm64|aarch64) echo "darwin-aarch64" ;;
+        x86_64)        echo "darwin-x86_64" ;;
+        *)             echo "darwin-aarch64" ;;   # best guess
+    esac
+}
+
+# latest_mac_launcher -> echoes "version<tab>url" if the API answered, else
+# nothing. No jq: the JSON is flat and grep+sed is plenty.
+latest_mac_launcher() {
+    local target resp url ver
+    target="$(update_target)"
+    resp="$(curl -fsSL --max-time 8 \
+        "${UPDATE_API_BASE}?target=${target}&current_version=0.0.0" 2>/dev/null)" || return 1
+    url="$(grep -oE '"url":"[^"]+"' <<<"$resp" | head -n1 | sed 's/^"url":"//; s/"$//')"
+    ver="$(grep -oE '"version":"[^"]+"' <<<"$resp" | head -n1 | sed 's/^"version":"//; s/"$//')"
+    [[ -n "$url" ]] || return 1
+    printf '%s\t%s\n' "${ver:-unknown}" "$url"
+}
+
+# installed_launcher_version -> reads CFBundleShortVersionString from the
+# installed app's Info.plist, or empty if not installed.
+installed_launcher_version() {
+    [[ -d "$APP_INSTALL_PATH" ]] || return 0
+    defaults read "${APP_INSTALL_PATH}/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null
+}
+
 download_if_missing() {
     local url="$1" out="$2" label="$3"
     if [[ -s "$out" ]]; then
@@ -151,8 +207,34 @@ cmd_doctor() {
     fi
 
     step "Install state"
-    [[ -x "$APP_BIN" ]] && ok "Mac launcher installed at ${APP_INSTALL_PATH}" \
-        || echo "  Mac launcher : not installed — run: ./mnm.sh mac"
+    if [[ -x "$APP_BIN" ]]; then
+        local iver lver latest
+        iver="$(installed_launcher_version)"
+        latest="$(latest_mac_launcher)" || true
+        lver="${latest%%$'\t'*}"
+        # The update API sometimes advertises a higher version string while
+        # serving a byte-identical tar.gz. We compare the tar hash from the
+        # last install (recorded in .installed_tar.sha256) against the tar
+        # the API currently points at. If the hashes match, the "newer"
+        # version is a relabel — nothing to do.
+        if [[ -n "$iver" && -n "$lver" && "$iver" != "$lver" && "$lver" != "unknown" ]]; then
+            local marker="${DL_DIR}/.installed_tar.sha256" cached_tar="${DL_DIR}/mnm_launcher_${lver}.app.tar.gz"
+            local inst_sha="" latest_sha=""
+            [[ -f "$marker" ]] && inst_sha="$(cat "$marker")"
+            [[ -s "$cached_tar" ]] && latest_sha="$(shasum -a 256 "$cached_tar" | cut -d' ' -f1)"
+            if [[ -n "$inst_sha" && -n "$latest_sha" && "$inst_sha" == "$latest_sha" ]]; then
+                ok "Mac launcher ${iver} (API advertises ${lver}, same binary)"
+            elif [[ -z "$latest_sha" ]]; then
+                echo "  Mac launcher : ${iver}. API advertises ${lver} — run ./mnm.sh mac to verify"
+            else
+                warn "Mac launcher ${iver} installed — different binary at ${lver} (run: ./mnm.sh mac)"
+            fi
+        else
+            ok "Mac launcher ${iver:-unknown} at ${APP_INSTALL_PATH}"
+        fi
+    else
+        echo "  Mac launcher : not installed — run: ./mnm.sh mac"
+    fi
     [[ -d "$BOTTLE_ROOT" ]] && ok "Bottle '${BOTTLE_NAME}' exists" \
         || echo "  Bottle       : not created — run: ./mnm.sh bottle"
 
@@ -162,16 +244,20 @@ cmd_doctor() {
         user="$(db_get username)"
         tok="$(db_get token)"
         gp="$(game_dir)"
-        [[ -n "$user" ]] && ok "Logged in as ${user}" || warn "Not logged in"
         if [[ -n "$tok" ]]; then
+            [[ -n "$user" ]] && ok "Logged in as ${user}" || ok "Logged in"
             local status; status="$(token_status)"
             case "$status" in
-                valid*)    ok "Token present — ${status}" ;;
+                valid*)    ok "Token — ${status}" ;;
                 expiring*) warn "Token ${status} — re-login soon (./mnm.sh patch)" ;;
                 expired*)  warn "Token ${status} — re-login (./mnm.sh patch) before ./mnm.sh play" ;;
                 *)         ok "Token present (${#tok} chars)" ;;
             esac
-        else warn "No token — open the launcher and log in"; fi
+        elif [[ -n "$user" ]]; then
+            warn "Username ${user} remembered but no token — finish login in ./mnm.sh patch"
+        else
+            warn "Not logged in — run ./mnm.sh patch"
+        fi
         echo "  gamePath     : ${gp}"
         exe="${gp}/${GAME_EXE_NAME}"
         if [[ -f "$exe" ]]; then ok "Game exe found: ${exe}"
@@ -186,16 +272,35 @@ cmd_doctor() {
 cmd_mac() {
     step "Installing native Mac launcher"
     ensure_dl_dir
-    download_if_missing "$MAC_TAR_URL" "$MAC_TAR" "Mac launcher tar.gz"
+
+    # Resolve the latest version via the update API. Falls back to the frozen
+    # public URL if the API is down — but warns loudly because that one is
+    # often several versions stale (was 0.20.3 vs 0.22.13 at time of writing).
+    local url version tar
+    local latest; latest="$(latest_mac_launcher)" || true
+    if [[ -n "$latest" ]]; then
+        version="${latest%%$'\t'*}"
+        url="${latest#*$'\t'}"
+        ok "Update API says latest is ${version}"
+    else
+        warn "Update API unreachable — using fallback URL (may be stale)"
+        version="fallback"
+        url="$FALLBACK_MAC_TAR_URL"
+    fi
+    tar="${DL_DIR}/mnm_launcher_${version}.app.tar.gz"
+
+    download_if_missing "$url" "$tar" "launcher ${version}"
 
     info "Verifying archive…"
-    gzip -t "$MAC_TAR" && ok "Archive OK"
+    gzip -t "$tar" && ok "Archive OK"
 
     local tmp; tmp="$(mktemp -d -t mnm-extract)"
-    trap 'rm -rf "$tmp"' RETURN
+    # Double-quoted: expands $tmp NOW so the trap has a literal path at
+    # fire time. Avoids set -u breaking when cmd_all chains functions.
+    trap "rm -rf '$tmp'" RETURN
 
     info "Extracting…"
-    tar -xzf "$MAC_TAR" -C "$tmp"
+    tar -xzf "$tar" -C "$tmp"
     local extracted="${tmp}/${APP_BUNDLE_NAME}"
     [[ -d "$extracted" ]] || fail "Expected ${APP_BUNDLE_NAME} in archive"
 
@@ -213,6 +318,9 @@ cmd_mac() {
         warn "Falling back to sudo for ${APP_INSTALL_DIR}"
         sudo mv "$extracted" "$APP_INSTALL_PATH"
     fi
+    # Marker so doctor can tell whether a newly advertised version is a
+    # meaningful update or just a version-label bump over the same bytes.
+    shasum -a 256 "$tar" | cut -d' ' -f1 > "${DL_DIR}/.installed_tar.sha256"
     ok "Installed"
     echo
     info "Next: ${C_BOLD}./mnm.sh patch${C_RESET}  (opens the launcher with --stinky-cheese)"
@@ -248,6 +356,29 @@ cmd_patch() {
     ok "Launcher started — log in, pick install location, Download/Patch."
     warn "${C_BOLD}Do NOT click Play${C_RESET} — that tries to exec Windows mnm.exe natively and crashes."
     warn "When patching finishes, close the launcher and run: ${C_BOLD}./mnm.sh play${C_RESET}"
+}
+
+cmd_refresh() {
+    # Open the launcher WITHOUT --stinky-cheese, so `check_for_updates`
+    # runs. This is useful because the update check likely also refreshes
+    # server-side things the daily path never touches — including the
+    # channel dropdown entitlements fetched via `fetch_channel_data`.
+    #
+    # Trade-off: on older launcher builds, skipping stinky-cheese can
+    # drop you into an infinite "downloading update" loop when the server
+    # advertises a version label newer than the binary it actually serves.
+    # If that happens, close it, use `patch` (stinky-cheese on) for daily
+    # use, and only call `refresh` occasionally.
+    [[ -x "$APP_BIN" ]] || fail "Mac launcher not installed — run: ./mnm.sh mac"
+    if pgrep -fq "mnm_launcher"; then
+        warn "Launcher is still running — close it first."
+        exit 1
+    fi
+    info "Opening launcher with update check ENABLED (no --stinky-cheese)…"
+    warn "If it loops downloading, force-quit it and use ${C_BOLD}./mnm.sh patch${C_RESET} instead."
+    nohup "$APP_BIN" >/dev/null 2>&1 &
+    disown
+    ok "Launcher started. Log in, then check the channel dropdown for a new entry."
 }
 
 cmd_repatch() {
@@ -331,6 +462,66 @@ cmd_clean() {
     ok "Done. Bottle and installed .app not touched."
 }
 
+cmd_nuke() {
+    step "Full teardown"
+
+    # Read gamePath BEFORE wiping the db — can't read it after.
+    local gp bin supportdir
+    gp="$(game_dir)"
+    supportdir="${HOME}/Library/Application Support/com.monstersandmemories.mnm-patcher-app"
+
+    echo "This will remove:"
+    echo "  app bundle    ${APP_INSTALL_PATH}"
+    echo "  launcher data ${supportdir}"
+    echo "  game files    ${gp}"
+    echo "  bottle        ${BOTTLE_ROOT}"
+    echo "  downloads     ${DL_DIR}"
+    echo
+    echo "It will NOT touch: CrossOver itself, other bottles, anything else."
+    read -r -p "Type ${C_BOLD}nuke${C_RESET} to confirm: " ans
+    [[ "$ans" == "nuke" ]] || fail "Cancelled."
+
+    # Safety: we only rm -rf paths that look like what we expect. Prevents
+    # an accidental wipe of $HOME if gamePath was set oddly.
+    local safe_game_dir=0
+    case "$gp" in
+        */mnm|*/mnm/|*/Monsters*Memories*|*/mnm-*) safe_game_dir=1 ;;
+    esac
+
+    # Kill any running launcher so replacement / removal doesn't race.
+    pkill -9 -f mnm_launcher 2>/dev/null || true
+    sleep 1
+
+    if [[ -d "$APP_INSTALL_PATH" ]]; then
+        info "Removing ${APP_INSTALL_PATH}"
+        rm -rf "$APP_INSTALL_PATH" 2>/dev/null || sudo rm -rf "$APP_INSTALL_PATH"
+    fi
+
+    if [[ -d "$supportdir" ]]; then
+        info "Removing ${supportdir}"
+        rm -rf "$supportdir"
+    fi
+
+    if (( safe_game_dir )) && [[ -d "$gp" ]]; then
+        info "Removing ${gp}"
+        rm -rf "$gp"
+    elif [[ -d "$gp" ]]; then
+        warn "Skipping game dir ${gp} — path doesn't look like a game install. Remove by hand if you really want."
+    fi
+
+    if [[ -d "$BOTTLE_ROOT" ]]; then
+        info "Removing bottle ${BOTTLE_NAME}"
+        if bin="$(cx_bin)"; then
+            "${bin}/cxbottle" --bottle "$BOTTLE_NAME" --delete --force >/dev/null 2>&1 || rm -rf "$BOTTLE_ROOT"
+        else
+            rm -rf "$BOTTLE_ROOT"
+        fi
+    fi
+
+    rm -rf "$DL_DIR" "${SCRIPT_DIR}/extracted"
+    ok "Clean slate. Next: ${C_BOLD}./mnm.sh all${C_RESET} and then ${C_BOLD}./mnm.sh patch${C_RESET}."
+}
+
 cmd_nuke_bottle() {
     local bin; bin="$(cx_bin)" || fail "CrossOver not installed"
     [[ -d "$BOTTLE_ROOT" ]] || { ok "No bottle '${BOTTLE_NAME}' to remove"; return 0; }
@@ -353,11 +544,15 @@ ${C_BOLD}Commands${C_RESET}
   mac           Download + fix + install the Mac launcher
   bottle        Create the CrossOver bottle for the game client
   patch         Open the Mac launcher with --stinky-cheese (skips update loop)
+  refresh       Open the launcher WITHOUT --stinky-cheese so it runs its
+                update check (may refresh beta channel entitlements). Use
+                patch if it loops.
   repatch       Clear the stuck version record and re-open for a forced diff
   play          Read token from launcher.db, run mnm.exe in the bottle
   all           doctor + mac + bottle  (then run patch, then play)
   clean         Remove cached downloads
-  nuke-bottle   Destroy the CrossOver bottle (confirms first)
+  nuke          Full teardown: app + launcher data + game files + bottle + dl/
+  nuke-bottle   Destroy the CrossOver bottle only (confirms first)
 
 ${C_BOLD}Workflow${C_RESET}
   ${C_DIM}first time:${C_RESET}    ./mnm.sh all && ./mnm.sh patch  ${C_DIM}# log in + download${C_RESET}
@@ -366,9 +561,10 @@ ${C_BOLD}Workflow${C_RESET}
   ${C_DIM}on patch day:${C_RESET}  ./mnm.sh patch  ${C_DIM}# update, then play again${C_RESET}
 
 ${C_BOLD}Env overrides${C_RESET}
-  MNM_DL_DIR     download cache             (default: ./dl)
-  MNM_APP_DIR    where to install the .app  (default: /Applications)
-  MNM_BOTTLE     CrossOver bottle name      (default: mnm)
+  MNM_DL_DIR     download cache                 (default: ./dl)
+  MNM_APP_DIR    where to install the .app      (default: /Applications)
+  MNM_BOTTLE     CrossOver bottle name          (default: mnm)
+  MNM_GAMEDIR    override game install path     (default: auto-discover)
 EOF
 }
 
@@ -377,10 +573,12 @@ case "${1:-}" in
     mac)            cmd_mac ;;
     bottle)         cmd_bottle ;;
     patch)          cmd_patch ;;
+    refresh)        cmd_refresh ;;
     repatch)        cmd_repatch ;;
     play)           cmd_play ;;
     all)            cmd_all ;;
     clean)          cmd_clean ;;
+    nuke)           cmd_nuke ;;
     nuke-bottle)    cmd_nuke_bottle ;;
     -h|--help|help|"") usage ;;
     *)              usage; exit 2 ;;
