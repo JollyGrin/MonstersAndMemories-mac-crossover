@@ -437,9 +437,26 @@ cmd_play() {
     info "Launching ${GAME_EXE_NAME} in bottle '${BOTTLE_NAME}' (workdir: ${gp})…"
     # --workdir is important for Unity asset loading.
     # --no-wait lets this shell return while the game runs.
+    #
+    # DXVK tunables (CrossOver 26's DXVK fork honours these):
+    #   DXVK_ASYNC=1  — compile shaders on a background thread instead of
+    #                   blocking the render thread. Massive stutter cut on
+    #                   first visit to each zone. If your CrossOver's DXVK
+    #                   doesn't support it, the var is silently ignored.
+    #   DXVK_HUD       — tiny overlay so you can SEE fps/gpu load/frametime
+    #                    rather than guessing. Set to empty string to hide.
+    #   DXVK_STATE_CACHE_PATH — stable per-user path so the compiled shader
+    #                    cache survives bottle rebuilds / nukes. Next run
+    #                    of any zone you've already visited is much faster.
+    local dxvk_cache="${HOME}/Library/Caches/mnm-dxvk"
+    mkdir -p "$dxvk_cache"
+    # cxstart's --env takes one whitespace-separated NAME=VALUE list, not
+    # repeated --env flags.
+    local envlist="DXVK_ASYNC=1 DXVK_HUD=fps,gpuload,frametime DXVK_STATE_CACHE_PATH=${dxvk_cache}"
     "${bin}/cxstart" \
         --bottle "$BOTTLE_NAME" \
         --workdir "$gp" \
+        --env "$envlist" \
         --no-wait \
         -- "$exe" --token "$token"
     ok "Game started."
